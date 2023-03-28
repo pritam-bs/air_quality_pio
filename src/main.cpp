@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <MQUnifiedsensor.h>
 #include <DHT.h>
-#include <DHT_U.h>
 #include <WiFi.h>
 #include <DNSServer.h>
 #include <WebServer.h>
@@ -20,12 +19,11 @@ struct Settings
 } settings;
 
 // Button press counter to enable setup
-bool isSetup = false;
 bool isCalibration = false;
 size_t setupEnableCount = 5;
 
-#define SETUP_BUTTON_PIN 12
-#define CALIBRATION_BUTTON_PIN 14
+#define CALIBRATION_BUTTON_PIN 0
+#define LED_PIN 2
 
 struct Button
 {
@@ -33,7 +31,6 @@ struct Button
   uint32_t numberKeyPresses;
 };
 
-Button setupButton = {SETUP_BUTTON_PIN, 0};
 Button calibrationButton = {CALIBRATION_BUTTON_PIN, 0};
 
 void sendRequest(float airQuality, float temperature, float humidity)
@@ -54,7 +51,7 @@ void sendRequest(float airQuality, float temperature, float humidity)
     doc["air_quality"] = airQuality;
     doc["temperature"] = temperature;
     doc["humidity"] = humidity;
-    doc["section"] = "female";
+    doc["section"] = settings.section;
 
     if (!serializeJson(doc, httpRequestData))
     {
@@ -88,17 +85,6 @@ void sendRequest(float airQuality, float temperature, float humidity)
   }
 }
 
-void IRAM_ATTR setupButtonPressed()
-{
-  setupButton.numberKeyPresses = setupButton.numberKeyPresses + 1;
-  Serial.println("Setup button press count: ");
-  Serial.println(setupButton.numberKeyPresses);
-  if (setupButton.numberKeyPresses >= setupEnableCount)
-  {
-    isSetup = true;
-  }
-}
-
 void IRAM_ATTR calibrationButtonPressed()
 {
   calibrationButton.numberKeyPresses = calibrationButton.numberKeyPresses + 1;
@@ -107,57 +93,40 @@ void IRAM_ATTR calibrationButtonPressed()
   if (calibrationButton.numberKeyPresses >= setupEnableCount)
   {
     isCalibration = true;
+    digitalWrite(LED_PIN, HIGH);
   }
 }
 
 void resetSetup()
 {
-  isSetup = false;
   isCalibration = false;
-  setupButton.numberKeyPresses = 0;
   calibrationButton.numberKeyPresses = 0;
+  digitalWrite(LED_PIN, LOW);
 }
 
 /************************Hardware Related Macros************************************/
 #define Board ("ESP-32") // Wemos ESP-32 or other board, whatever have ESP32 core.
-#define Pin (25)         // IO25 for your ESP32 WeMos Board, pinout here: https://i.pinimg.com/originals/66/9a/61/669a618d9435c702f4b67e12c40a11b8.jpg
+#define Pin (34)         // IO25 for your ESP32 WeMos Board, pinout here: https://i.pinimg.com/originals/66/9a/61/669a618d9435c702f4b67e12c40a11b8.jpg
 /***********************Software Related Macros************************************/
-#define Type ("MQ-3")            // MQ3 or other MQ Sensor, if change this verify your a and b values.
+#define Type "MQ-135"            // MQ3 or other MQ Sensor, if change this verify your a and b values.
 #define Voltage_Resolution (3.3) // 3V3 <- IMPORTANT. Source: https://randomnerdtutorials.com/esp32-adc-analog-read-arduino-ide/
 #define ADC_Bit_Resolution (12)  // ESP-32 bit resolution. Source: https://randomnerdtutorials.com/esp32-adc-analog-read-arduino-ide/
 #define RatioMQ135CleanAir (3.6) // RS / R0 = 3.6 ppm
 
-#define MQ135_DEFAULTPPM 399            // default ppm of CO2 for calibration
-#define MQ135_DEFAULTRO 68550           // default Ro for MQ135_DEFAULTPPM ppm of CO2
-#define MQ135_SCALINGFACTOR 116.6020682 // CO2 gas value
-#define MQ135_EXPONENT -2.769034857     // CO2 gas value
-#define MQ135_MAXRSRO 2.428             // for CO2
-#define MQ135_MINRSRO 0.358             // for CO2
-
-/// Parameters for calculating ppm of CO2 from sensor resistance
-#define PARA 116.6020682
-#define PARB 2.769034857
-
-/// Parameters to model temperature and humidity dependence
-#define CORA 0.00035
-#define CORB 0.02718
-#define CORC 1.39538
-#define CORD 0.0018
-
-#define DHTPIN 2 // Digital pin connected to the DHT sensor
+#define DHTPIN 25 // Digital pin connected to the DHT sensor
 // Feather HUZZAH ESP8266 note: use pins 3, 4, 5, 12, 13 or 14 --
 // Pin 15 can work but DHT must be disconnected during program upload.
 
 // Uncomment the type of sensor in use:
 #define DHTTYPE DHT11 // DHT 11
-//#define DHTTYPE DHT22 // DHT 22 (AM2302)
-//#define DHTTYPE    DHT21     // DHT 21 (AM2301)
+// #define DHTTYPE DHT22 // DHT 22 (AM2302)
+// #define DHTTYPE    DHT21     // DHT 21 (AM2301)
 
 // See guide for details on sensor wiring and usage:
 //   https://learn.adafruit.com/dht/overview
 
 /*****************************Globals***********************************************/
-DHT_Unified dht(DHTPIN, DHTTYPE);
+DHT dht(DHTPIN, DHTTYPE);
 uint32_t delayMS;
 MQUnifiedsensor MQ135(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
 /*****************************Globals***********************************************/
@@ -170,9 +139,14 @@ MQUnifiedsensor MQ135(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
 @return The calculated correction factor
 */
 /**************************************************************************/
+/// Parameters to model temperature and humidity dependence
+#define CORA 0.00035
+#define CORB 0.02718
+#define CORC 1.39538
+#define CORD 0.0018
 float getCorrectionFactor(float t, float h)
 {
-  return CORA * t * t - CORB * t + CORC - (h - 33.) * CORD;
+  return CORA * t * t - CORB * t + CORC - (h - 33.0) * CORD;
 }
 
 /**************************************************************************/
@@ -189,19 +163,51 @@ float getCorrectedResistance(long resvalue, float t, float h)
   return resvalue / getCorrectionFactor(t, h);
 }
 
-/**************************************************************************/
-/*!
-@brief  Get the ppm of CO2 sensed (assuming only CO2 in the air), corrected
-        for temp/hum
-@param[in] t  The ambient air temperature
-@param[in] h  The relative humidity
-@return The ppm of CO2 in the air
-*/
-/**************************************************************************/
-float getCorrectedPPM(long resvalue, float t, float h, long ro)
+/*****************************  MQ Calibration ********************************************/
+void startCalibration()
 {
-  return PARA * pow((getCorrectedResistance(resvalue, t, h) / ro), -PARB);
+  // Explanation:
+  // In this routine the sensor will measure the resistance of the sensor supposedly before being pre-heated
+  // and on clean air (Calibration conditions), setting up R0 value.
+  // We recomend executing this routine only on setup in laboratory conditions.
+  // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
+  // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
+
+  Serial.print("Calibrating please wait.");
+  float calcR0 = 0;
+  for (int i = 1; i <= 10; i++)
+  {
+    MQ135.update(); // Update data, the arduino will read the voltage from the analog pin
+    calcR0 += MQ135.calibrate(RatioMQ135CleanAir);
+    Serial.print(".");
+  }
+  float R0 = calcR0 / 10.0;
+  MQ135.setR0(R0);
+  Serial.println("  done!.");
+
+  if (isinf(calcR0))
+  {
+    Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply");
+    digitalWrite(LED_PIN, HIGH);
+  }
+  if (calcR0 == 0)
+  {
+    Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply");
+    digitalWrite(LED_PIN, HIGH);
+  }
+  settings.R0 = R0;
+  EEPROM.put(0, settings);
+  if (EEPROM.commit())
+  {
+    Serial.println("Settings saved");
+  }
+  else
+  {
+    Serial.println("EEPROM error");
+    digitalWrite(LED_PIN, HIGH);
+  }
 }
+/*****************************  MQ CAlibration ********************************************/
 
 void setup()
 {
@@ -209,26 +215,10 @@ void setup()
   Serial.begin(115200);
 
   resetSetup();
-
-  pinMode(setupButton.PIN, INPUT_PULLUP);
   pinMode(calibrationButton.PIN, INPUT_PULLUP);
-  attachInterrupt(setupButton.PIN, setupButtonPressed, FALLING);
   attachInterrupt(calibrationButton.PIN, calibrationButtonPressed, FALLING);
 
-  // Delay to push SETUP button
-  Serial.println("Press setup or calibration button for 5 times");
-  for (int sec = 5; sec > 0; sec--)
-  {
-    Serial.print(sec);
-    Serial.print("..");
-    delay(1000);
-  }
-
-  Serial.println("");
-  Serial.println("Setup button press count: ");
-  Serial.println(setupButton.numberKeyPresses);
-  Serial.println("Calibration button press count: ");
-  Serial.println(calibrationButton.numberKeyPresses);
+  pinMode(LED_PIN, OUTPUT);
 
   EEPROM.begin(512);
   EEPROM.get(0, settings);
@@ -238,77 +228,41 @@ void setup()
   settings.gatewayIP[15] = '\0';
   settings.port[4] = '\0';
 
-  if (isCalibration)
-  {
-    /*****************************  MQ Calibration ********************************************/
-    // Explanation:
-    // In this routine the sensor will measure the resistance of the sensor supposedly before being pre-heated
-    // and on clean air (Calibration conditions), setting up R0 value.
-    // We recomend executing this routine only on setup in laboratory conditions.
-    // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
-    // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
+  WiFiManager wm;
+  WiFiManagerParameter gatewayIP("gatewayIP", "Gateway IP", settings.gatewayIP, 15);
+  WiFiManagerParameter gatewayPort("gatewayPort", "Gateway Port", settings.port, 4);
+  WiFiManagerParameter facilitySection("facilitySection", "Facility Section", settings.section, 6);
+  WiFiManagerParameter updateFrequency("updateFrequency", "Update Frequency", String(settings.delay).c_str(), 2);
+  WiFiManagerParameter valueOfR0("valueOfR0", "R0 Value(00.00)", String(settings.R0).c_str(), 5);
 
-    Serial.print("Calibrating please wait.");
-    float calcR0 = 0;
-    for (int i = 1; i <= 10; i++)
-    {
-      MQ135.update(); // Update data, the arduino will read the voltage from the analog pin
-      calcR0 += MQ135.calibrate(RatioMQ135CleanAir);
-      Serial.print(".");
-    }
-    float R0 = calcR0 / 10.0;
-    MQ135.setR0(R0);
-    Serial.println("  done!.");
+  wm.addParameter(&gatewayIP);
+  wm.addParameter(&gatewayPort);
+  wm.addParameter(&facilitySection);
+  wm.addParameter(&updateFrequency);
+  wm.addParameter(&valueOfR0);
 
-    if (isinf(calcR0))
-    {
-      Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply");
-      while (1)
-        ;
-    }
-    if (calcR0 == 0)
-    {
-      Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply");
-      while (1)
-        ;
-    }
-    settings.R0 = R0;
-    /*****************************  MQ CAlibration ********************************************/
-  }
+  // SSID & password parameters already included
+  wm.setConfigPortalTimeout(120);
+  wm.autoConnect("MLBD_Air_Quality", "Mlbd@1234");
 
-  if (isSetup)
-  {
-    Serial.println("Setup Mode");
-    WiFiManager wm;
-    WiFiManagerParameter gatewayIP("gatewayIP", "Gateway IP", "192.168.10.104", 15);
-    WiFiManagerParameter gatewayPort("gatewayPort", "Gateway Port", "5454", 4);
-    WiFiManagerParameter facilitySection("facilitySection", "Facility Section", "female", 6);
-    WiFiManagerParameter updateFrequency("updateFrequency", "Update Frequency", "15", 2);
+  strncpy(settings.gatewayIP, gatewayIP.getValue(), 16);
+  strncpy(settings.port, gatewayPort.getValue(), 5);
+  strncpy(settings.section, facilitySection.getValue(), 7);
+  settings.delay = String(updateFrequency.getValue()).toInt();
+  settings.R0 = String(valueOfR0.getValue()).toFloat();
 
-    wm.addParameter(&gatewayIP);
-    wm.addParameter(&gatewayPort);
-    wm.addParameter(&facilitySection);
-    wm.addParameter(&updateFrequency);
+  settings.section[6] = '\0';
+  settings.gatewayIP[15] = '\0';
+  settings.port[4] = '\0';
 
-    // SSID & password parameters already included
-    wm.startConfigPortal("MLBD_Air_Quality", "Mlbd@1234");
-
-    strncpy(settings.gatewayIP, gatewayIP.getValue(), 16);
-    strncpy(settings.port, gatewayPort.getValue(), 5);
-    strncpy(settings.section, facilitySection.getValue(), 7);
-    settings.delay = String(updateFrequency.getValue()).toInt();
-
-    settings.section[6] = '\0';
-    settings.gatewayIP[15] = '\0';
-    settings.port[4] = '\0';
-
-    Serial.print("Gateway IP: ");
-    Serial.println(settings.gatewayIP);
-    Serial.print("Gateway Port: ");
-    Serial.println(settings.port);
-    Serial.print("Section: ");
-    Serial.println(settings.section);
-  }
+  Serial.print("Gateway IP: ");
+  Serial.println(settings.gatewayIP);
+  Serial.print("Gateway Port: ");
+  Serial.println(settings.port);
+  Serial.print("Section: ");
+  Serial.println(settings.section);
+  Serial.print("R0: ");
+  Serial.println(settings.R0);
 
   EEPROM.put(0, settings);
   if (EEPROM.commit())
@@ -320,12 +274,27 @@ void setup()
     Serial.println("EEPROM error");
   }
 
-  resetSetup();
-
   // Init serial port
   dht.begin();
 
   // Set math model to calculate the PPM concentration and the value of constants
+  Serial.println("Saved R0 value: ");
+  Serial.println(settings.R0);
+  if (isnan(String(settings.R0).toFloat()))
+  {
+    MQ135.setR0(10.00);
+    Serial.println("Default R0 is set: ");
+    Serial.println(10.00);
+  }
+  else
+  {
+    MQ135.setR0(settings.R0);
+    Serial.println("R0 from settings is set: ");
+    Serial.println(settings.R0);
+  }
+
+  Serial.println("Update frequency: ");
+  Serial.println(delayMS);
   MQ135.setRegressionMethod(1); //_PPM =  a*ratio^b
   MQ135.setA(102.2);
   MQ135.setB(-2.473); // Configure the equation to to calculate NH4 concentration
@@ -351,29 +320,47 @@ void setup()
   MQ135.serialDebug(true);
 
   // Set delay between sensor readings based on sensor details.
-  if (!isnan(settings.delay))
+  Serial.println("Saved delay: ");
+  Serial.println(settings.delay);
+  if (isnan(String(settings.delay).toInt()))
   {
     delayMS = 5 * 60 * 1000;
+    Serial.println("Default delay is set: ");
+    Serial.println(delayMS);
   }
   else
   {
     delayMS = String(settings.delay).toInt() * 60 * 1000;
+    Serial.println("Delay from settings is set: ");
+    Serial.println(delayMS);
   }
+
+  Serial.println("Update frequency: ");
+  Serial.println(delayMS);
 }
 
 void loop()
 {
+  Serial.println("Looping....");
+
+  if (isCalibration == true)
+  {
+    resetSetup();
+    startCalibration();
+  }
+
   delay(delayMS); // Sampling frequency
-
+  Serial.println("Going to measure air quality....");
   // if you want to apply corelation factor, you will add in this program the temperature and humidity sensor
-  sensors_event_t event;
-  dht.temperature().getEvent(&event);
-  float temperature = event.temperature;
-  float humidity = event.relative_humidity;
-
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+  Serial.println("Temperature");
+  Serial.println(temperature);
+  Serial.println("Humidity");
+  Serial.println(humidity);
   float cFactor = 0;
   if (!isnan(temperature) && !isnan(humidity))
-    cFactor = getCorrectionFactor(event.temperature, event.relative_humidity);
+    cFactor = getCorrectionFactor(temperature, humidity);
   Serial.print("Correction Factor: ");
   Serial.println(cFactor);
   MQ135.update();                                      // Update data, the arduino will read the voltage from the analog pin
